@@ -1,1 +1,204 @@
+#Pemanggilan *Packages*
+```{r}
+library(dplyr)
+library(TTR)
+library(forecast)
+library(lmtest) #digunakan untuk uji formal pendeteksian autokorelasi
+library(orcutt) #untuk membuat model regresi Cochrane-Orcutt
+library(HoRM) #untuk membuat model regresi Hildreth-Lu
+```
 
+#Input Data
+```{r}
+library(rio)
+turbin <- import("https://raw.githubusercontent.com/akabanenabaka/mpdw/main/turbin.csv")
+```
+
+#Eksplorasi Data
+```{r}
+#Menghasilkan plot ggpairs
+plot <- ggpairs(turbin[sapply(turbin, is.numeric)])
+
+#Mengatur ukuran font pada semua elemen
+plot <- plot + theme(
+  axis.text = element_text(size = 5),
+  axis.title = element_text(size = 5),
+  legend.text = element_text(size = 5)
+)
+
+#Tampilkan plot
+print(plot)
+```
+
+#Model Regresi Linear Berganda OLS
+```{r}
+model <- lm(ActivePower ~ GeneratorRPM+MainBoxTemperature+WindSpeed, turbin)
+summary(model)
+```
+#Model Regresi Terbaik
+```{r}
+bestsubset <- ols_step_best_subset(model)
+bestsubset
+```
+Model terbaik dengan kriteria *AIC* terkecil adalah model awal dengan peubah bebas $x_1$, $x_2$, dan $x_3$
+
+#Pengecekan Multikolinearitas
+```{r}
+# Pengecekan pertama
+library(car)
+vif(model)
+```
+Hasil tersebut menunjukkan nilai *VIF* \< 10 sehingga tidak terdapat multikolinieritas pada peubah bebas.
+
+
+#Uji Normalitas
+$H_0$: Sisaan menyebar normal
+$H_1$: Sisaan tidak menyebar normal
+```{r}
+# Kolmogorov-Smirnov test
+ks.test(model$residuals, "pnorm", mean=mean(model2$residuals), sd=sd(model2$residuals))
+
+# Shapiro-Wilk normality test
+library(car)
+shapiro.test(model$residuals)
+```
+Berdasarkan uji formal Saphiro-Wilk dan Kolmogorov-Smirnov didapatkan nilai *p-value* \> $\alpha$ (5%). Artinya, cukup bukti untuk menyatakan sisaan berdistribusi normal.
+
+
+##Sisaan saling bebas
+$H_0$: tidak ada autokorelasi (sisaan saling bebas)
+$H_1$: ada autokorelasi (sisaan tidak saling bebas)
+```{r}
+#ACF dan PACF identifikasi autokorelasi
+sisaan <- residuals(model)
+par(mfrow = c(1,2))
+acf(sisaan)
+pacf(sisaan)
+
+# Runs Test
+library(randtests)
+runs.test(model$residuals)
+
+# Durbin Watson Test
+library(lmtest)
+dwtest(model)
+
+# Breusch-Godfrey Test
+bgtest(model)
+```
+Berdasarkan plot ACF dan PACF, terlihat terdapat plot yang berada di luar rentang batas yang artinya dapat diperoleh kesimpulan bahwa tolak $H_0$ atau cukup bukti untuk menyatakan bahwa terdapat autokorelasi. Kesimpulan tersebut juga didukung oleh hasil uji formal menggunakan *Runs test*, *Durbin Watson test*, dan *Breusch-Godfrey test* yang menghasilkan *p-value* \< $\alpha$=5%. Oleh karena itu, diperlukan penangan autokorelasi. Penanganan yang akan digunakan menggunakan dua metode, yaitu *Cochrane-Orcutt* dan *Hildret-Lu*.
+
+
+#Penanganan Autokorelasi
+##Metode Cochrane-Orcutt
+```{r}
+#Penanganan Autokorelasi Cochrane-Orcutt
+modelCO<-cochrane.orcutt(model)
+modelCO
+```
+Hasil keluaran model setelah dilakukan penanganan adalah $$y_i=-163.754235-0.041828x_1-19.215100x_2+290.247024x_3$$. Hasil juga menunjukkan nilai *p-value* \> 0.05, artinya belum cukup bukti menyatakan bahwa sisaan terdapat autokorelasi pada taraf nyata 5%. Untuk nilai $ρ ̂$ optimum yang digunakan adalah $0.367061$.
+
+```{r}
+#Rho optimum
+rho<- modelCO$rho
+rho
+```
+
+#Transformasi secara manual
+```{r}
+ActivePower.trans<- turbin$ActivePower[-1]-turbin$ActivePower[-115]*rho
+GeneratorRPM.trans<- turbin$GeneratorRPM[-1]-turbin$GeneratorRPM[-115]*rho
+MainBoxTemperature.trans<- turbin$MainBoxTemperature[-1]-turbin$MainBoxTemperature[-115]*rho
+WindSpeed.trans<- turbin$WindSpeed[-1]-turbin$WindSpeed[-115]*rho
+modelCOmanual<- lm(ActivePower.trans~GeneratorRPM.trans+MainBoxTemperature.trans+WindSpeed.trans)
+summary(modelCOmanual)
+```
+Hasil model transformasi bukan merupakan model sesungguhnya. Koefisien regresi masih perlu dicari kembali mengikuti $β_0^*=β_0+ρ ̂β_0$ dan $β_1^*=β_1$.
+
+
+#Mencari Penduga Koefisien Regresi setelah Transformasi ke Persamaan Awal
+```{r}
+b0bintang <- modelCOmanual$coefficients[1]
+b0 <- b0bintang/(1-rho)
+b1 <- modelCOmanual$coefficients[2:4]
+b0
+b1
+```
+Hasil perhitungan koefisien regresi tersebut akan menghasilkan hasil yang sama dengan model yang dihasilkan menggunakan *packages*.
+
+#Metode Hildreth-Lu
+##Penanganan Autokorelasi Hildreth lu
+```{r}
+hildreth.lu.func<- function(r, model){
+  x1 <- model.matrix(model)[,2]
+  x2 <- model.matrix(model)[,3]
+  x3 <- model.matrix(model)[,4]
+  y <- model.response(model.frame(model))
+  n <- length(y)
+  t <- 2:n
+  y <- y[t]-r*y[t-1]
+  x1 <- x1[t]-r*x1[t-1]
+  x2 <- x2[t]-r*x2[t-1]
+  x3 <- x3[t]-r*x3[t-1]
+  
+  return(lm(y~x1+x2+x3))
+}
+```
+
+#Pencarian rho yang meminimumkan SSE
+```{r}
+r <- c(seq(0.1,0.9, by= 0.1))
+tab <- data.frame("rho" = r, "SSE" = sapply(r, function(i){deviance(hildreth.lu.func(i, model))}))
+round(tab, 4)
+```
+Pertama-tama akan dicari di mana kira-kira $ρ$ yang menghasilkan SSE minimum. Pada hasil di atas terlihat $ρ$ minimum ketika 0.4. Namun, hasil tersebut masih kurang teliti sehingga akan dicari kembali $ρ$ yang lebih optimum dengan ketelitian yang lebih. Jika sebelumnya jarak antar $ρ$ yang dicari adalah 0.1, kali ini jarak antar $ρ$ adalah 0.001 dan dilakukan pada selang 0.3 sampai dengan 0.5.
+
+```{r}
+#Rho optimal di sekitar 0.4
+rOpt <- seq(0.3,0.5, by= 0.001)
+tabOpt <- data.frame("rho" = rOpt, "SSE" = sapply(rOpt, function(i){deviance(hildreth.lu.func(i, model))}))
+head(tabOpt[order(tabOpt$SSE),])
+
+#Grafik SSE optimum
+par(mfrow = c(1,1))
+plot(tab$SSE ~ tab$rho , type = "l", xlab = "Rho", ylab = "SSE")
+abline(v = tabOpt[tabOpt$SSE==min(tabOpt$SSE),"rho"], lty = 2, col="red",lwd=2)
+text(x=0.367, y=883107.7, labels = "rho=0.367", cex = 0.8)
+```
+Perhitungan yang dilakukan aplikasi `R` menunjukkan bahwa nilai $ρ$ optimum, yaitu saat SSE terkecil terdapat pada nilai $ρ=0.367$. Hal tersebut juga ditunjukkan pada plot. Selanjutnya, model dapat didapatkan dengan mengevaluasi nilai $ρ$ ke dalam fungsi `hildreth.lu.func`, serta dilanjutkan dengan pengujian autokorelasi dengan uji Durbin-Watson. Namun, setelah pengecekan tersebut tidak lupa koefisien regresi tersebut digunakan untuk transformasi balik. Persamaan hasil transformasi itulah yang menjadi persamaan sesungguhnya.
+
+```{r}
+#Model terbaik
+modelHL <- hildreth.lu.func(0.367, model)
+summary(modelHL)
+
+#Transformasi Balik
+cat("y = ", coef(modelHL)[1]/(1-0.367), "+", coef(modelHL)[2],"x1","+", coef(modelHL)[3],"x2","+", coef(modelHL)[4],"x3", sep = "")
+```
+Setelah dilakukan tranformasi balik, didapatkan model dengan metode Hildreth-Lu sebagai berikut. $$y_i=-163.7555-0.04183626x1x_1-19.21535x_2+290.2507x_3$$
+
+```{r}
+#Deteksi autokorelasi
+dwtest(modelHL)
+```
+Hasil uji *Durbin-Watson* juga menunjukkan bawah nilai *p-value* sebesar $0.7713$, di mana *p-value* \> $\alpha$=5%. Artinya tak tolak $H_0$ atau belum cukup bukti menyatakan bahwa terdapat autokorelasi dengan metode *Hildreth-Lu* pada taraf nyata 5%.
+
+Terakhir, akan dibandingkan nilai SSE dari ketiga metode (metode awal, metode Cochrane-Orcutt, dan Hildreth-Lu).
+```{r}
+sseModelawal <- anova(model)$`Sum Sq`[-(1:3)]
+sseModelCO <- anova(modelCOmanual)$`Sum Sq`[-(1:3)]
+sseModelHL <- anova(modelHL)$`Sum Sq`[-(1:3)]
+mseModelawal <- sseModelawal/length(y)
+mseModelCO <- sseModelCO/length(y)
+mseModelHL <- sseModelHL/length(y)
+akurasi <- matrix(c(sseModelawal,sseModelCO,sseModelHL,
+                    mseModelawal,mseModelCO,mseModelHL),nrow=2,ncol=3,byrow = T)
+colnames(akurasi) <- c("Model Awal", "Model Cochrane-Orcutt", "Model Hildreth-Lu")
+row.names(akurasi) <- c("SSE","MSE")
+akurasi
+```
+Berdasarkan hasil tersebut dapat diketahui bahwa hasil penanganan autokorelasi dengan metode *Hildreth-Lu* memiliki *SSE* yang paling kecil,  yaitu sebesar $883107.750$. Namun, metode *Cochrane-Orcutt* dan metode *Hildreth-Lu* tersebut menghasilkan *SSE* yang lebih baik dibandingkan model awal dan model Cochrane-Orcutt.
+
+
+# Simpulan
+Autokorelasi yang terdapat pada data Active Power terjadi akibat adanya korelasi di antara unsur penyusunnya. Indikator Active Power yang erat hubungannya dengan komponen-komponen pada turbin dan kecepatan angin sangat rawan menjadi penyebab adanya autokorelasi. Adanya autokorelasi menyebabkan model regresi kurang baik karena akan meingkatkan galatnya. Autokorelasi dapat dideteksi secara eksploratif melalui plot sisaan, ACF, dan PACF, serta dengan uji formal Durbin-Watson. Namun, autokorelasi tersebut dapat ditangani dengan metode Cochrane-Orcutt dan Hildreth-Lu. Disarankan menggunakan metode Hildreth-Lu karena menghasilkan nilai SSE terkecil.
