@@ -1,2 +1,2 @@
 # MPDW
-praktikum mpdw ihiy
+praktikum mpdw
